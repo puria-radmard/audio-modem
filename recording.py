@@ -15,8 +15,6 @@ myrecording = np.array(myrecording)
 myrecording = myrecording.reshape(-1)
 fft_out= fft(myrecording)
 
-import pdb;pdb.set_trace()
-
 plt.figure()
 plt.plot(f, fft_out)
 plt.ylim([1e-4, 1e1])
