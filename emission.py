@@ -1,5 +1,4 @@
 import numpy as np
-import sounddevice as sd
 
 def emmit(bitschunk):
 
