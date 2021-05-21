@@ -1,8 +1,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import chirp
-from scipy.io.wavfile import write
-import pyaudio
+import sounddevice as sd
+from scipy.signal import convolve
 
 def chirp_time_domain(t, omega_1, omega_2):
     T = len(t)
@@ -14,23 +14,18 @@ def chirp_time_domain(t, omega_1, omega_2):
 T = 10
 fs= 44100
 _t = np.linspace(0, T, fs*T)
-samples = chirp(_t, 60, T, 5000)
-plt.plot(_t, samples)
-plt.show()
+check_signal = chirp(_t, 60, T, 5000)
 
-p = pyaudio.PyAudio()
-stream = p.open(format=pyaudio.paFloat32,
-                channels=2,
-                rate=44100,
-                frames_per_buffer=1024,
-                output=True,
-                )
-stream.write(samples.astype(np.float32).tostring())
-stream.close()
 
-print(len(samples))
-padded_zeros = np.zeros(500000)
-padded_chirp = np.concatenate((padded_zeros, samples ,padded_zeros))
-print(len(padded_chirp))
-scaled = np.int16(padded_chirp/np.max(np.abs(padded_chirp)) * 32767)
-write('paddedCHIRP.wav', 44100, scaled)
+fs=44100
+duration = 1# 40 # seconds
+myrecording = sd.rec(int(duration * fs), samplerate=fs, channels=1)
+sd.wait()
+print("recording done")
+myrecording = np.array(myrecording)
+myrecording = myrecording.reshape(-1)
+matched_filter_output = convolve(myrecording, check_signal[::-1], method = 'fft')
+
+plt.plot(matched_filter_output)
+plt.savefig("matched_filter_output.png")
+import pdb; pdb.set_trace()
