@@ -22,7 +22,7 @@ class Channel:
     def transmit(self, signal: np.ndarray) -> np.ndarray:
         # Transmit sequence by convolving with impulse reponse
         echo = convolve(signal, self.impulse_response)[: len(signal)]
-        # echo += np.random.randn(len(signal)) * 0.001
+        echo += np.random.randn(len(signal)) * 0.001
         return echo
 
     def transfer_function(self, length: int) -> np.ndarray:
@@ -75,7 +75,20 @@ class Synchronisation:
     def matched_filter(self, data):
         return convolve(data, self.reversed_chirp)[: len(data)]
 
+    def locate_chirp_slices(self, data, sample_shift=0):
+        earliest_chirp_idx = np.argmax(data)
+        earliest_frame_start = earliest_chirp_idx + self.delay_after_peak
+        earliest_frame_end = earliest_chirp_idx + self.total_post_peak_samples
+
+        start = earliest_frame_start
+        stop = earliest_frame_end
+        new_slice = slice(max(0, start + sample_shift), stop + sample_shift)
+        
+        return [new_slice]
+
+
     def locate_first_chirp(self, data, threshold):
+        # Not used
         if all(data < threshold):
             return None
         first_chirp_region_start_idx = np.argmax(data > threshold)
@@ -88,7 +101,7 @@ class Synchronisation:
         )
         return first_peak_idx
 
-    def locate_chirp_slices(self, data, sample_shift=0):
+    def OLD_locate_chirp_slices(self, data, sample_shift=0):
         frames_removed = 0
         _data = data.copy()
         slices_located = []
@@ -299,7 +312,7 @@ class Demodulation:
             fig.savefig("pilot_rotation.png")
 
             
-        chirp_frames = [channel_output[sl] for sl in chirp_slices][:1]
+        chirp_frames = [channel_output[sl] for sl in chirp_slices]
         for frame in chirp_frames:
             new_frames = np.array_split(frame, len(frame) / (self.N + self.L))
             OFDM_frames.extend(new_frames)
@@ -337,6 +350,7 @@ class Estimation(Demodulation):
         received_OFDM_frames = self.receive_channel_output(
             channel_output, synchronisation, sample_shift
         )
+        
         transfer_function_trials = []
 
         for j, ground_truth_OFDM_frame in enumerate(ground_truth_OFDM_frames):
@@ -344,9 +358,9 @@ class Estimation(Demodulation):
             input_spectrum = fft(
                 ground_truth_OFDM_frame[self.L :]
             ).round()  # MAY NEED FIXING IF NOT ALWAYS USING INTEGERS
-            # import pdb; pdb.set_trace()
+            
             transfer_function = np.divide(output_spectrum, input_spectrum)
-
+            
             # MIGHT NOT WORK FOR ODD N
             transfer_function[0] = 0
             transfer_function[int(self.N / 2)] = 0
@@ -368,11 +382,16 @@ if __name__ == "__main__":
     """
     
     text_bits = "".join([str(s) for s in s_to_bitlist(text)])
-    # text_bits = "{0:b}".format(random.getrandbits(20000))
+    #text_bits = "{0:b}".format(random.getrandbits(len(text_bits)))
 
-    N = 4096
-    L = 512
+    N = 8192
+    L = 1024
     T = 1.5
+
+    c_func = lambda t: chirp(t, f0=20000, f1=60, t1=T, method="logarithmic")
+    c_func = lambda t: exponential_chirp(t, f0=60, f1=20000, t1=T)
+    c_func = np.vectorize(c_func)
+
 
     if sys.argv[1] == "demod":
         channel = Channel(channel_impulse)
@@ -380,14 +399,14 @@ if __name__ == "__main__":
         output_text = demodulation.OFDM2bits(artificial_channel_output, channel)
 
     elif sys.argv[1] == "chirp_sync":
-        c_func = lambda t: chirp(t, f0=20000, f1=60, t1=T, method="logarithmic")
+
         sync = Synchronisation(
             ["chirp"],
             chirp_length=T,
             chirp_func=c_func,
             N=N,
             L=L,
-            num_OFDM_symbols_chirp=79,
+            num_OFDM_symbols_chirp=80,
         )
 
         modulator = Modulation(constellation_name="gray", N=N, L=L)
@@ -395,8 +414,9 @@ if __name__ == "__main__":
         channel = Channel(impulse_response=channel_impulse)
 
         OFDM_transmission = modulator.data2OFDM(bitstring=text_bits, synchroniser=sync)
-        modulator.publish_data(OFDM_transmission, "asf_longer")
+        modulator.publish_data(OFDM_transmission, "george_chirp")
         channel_output = channel.transmit(OFDM_transmission)
+        channel_output = np.concatenate([np.zeros(5000), channel_output])
 
         output_bits = demodulation.OFDM2bits(channel_output, channel, sync)
         output_text = bitlist_to_s([int(i) for i in list(output_bits)])
@@ -423,8 +443,8 @@ if __name__ == "__main__":
         )
         modulator.publish_data(OFDM_transmission, "asf")
 
-        channel_output = np.load("main_room.npy").reshape(-1)
-        # channel_output = channel.transmit(OFDM_transmission)
+        channel_output_real = np.load("george_recording.npy").reshape(-1)
+        channel_output_simulated = channel.transmit(OFDM_transmission)
 
         impulse_responses = []
         fig, axs = plt.subplots(1)
@@ -433,18 +453,27 @@ if __name__ == "__main__":
         axs[0].set_xlabel("Sample number")
         axs[0].set_ylabel("Impulse coeff")
 
-        for shift in [-20]:  # range(0, 3):
+        for shift in [0]:#, -50]:  # range(0, 3):
 
-            average_impulse = estimator.OFDM_channel_estimation(
-                channel_output,
+            # average_impulse_simulated = estimator.OFDM_channel_estimation(
+            #     channel_output_simulated,
+            #     synchronisation=sync,
+            #     ground_truth_OFDM_frames=OFDM_data,
+            #     sample_shift=shift,
+            # )
+            # axs[0].plot(range(30), average_impulse_simulated.real[:30], label=f"{shift} samples")
+            # axs[0].plot(range(30), channel_impulse, label=f"{shift} samples")
+
+            average_impulse_real = estimator.OFDM_channel_estimation(
+                channel_output_real,
                 synchronisation=sync,
                 ground_truth_OFDM_frames=OFDM_data,
                 sample_shift=shift,
             )
-            axs[0].plot(average_impulse.real, label=f"{shift} samples")
+            axs[0].plot(average_impulse_real.real, label=f"{shift} samples")            
 
         fig.legend()
-        fig.savefig("OFDM_estimation_shifts_400.png")
+        fig.savefig("OFDM_estimation_shifts_trial.png")
 
     elif sys.argv[1] == "pilot_sync":
 

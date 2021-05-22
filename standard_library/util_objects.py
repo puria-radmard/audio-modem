@@ -1,3 +1,5 @@
+import math
+
 fs = 44100
 
 CONSTELLATIONS_DICT = {
@@ -19,3 +21,22 @@ def bitlist_to_chars(bl):
         yield chr(sum(bit << s for bit, s in zip(byte, shifts)))
 def bitlist_to_s(bl):
     return ''.join(bitlist_to_chars(bl))
+
+
+def exponential_chirp(t, f0, f1, t1):
+    r = f1/f0
+    window_strength = 10
+    return math.sin(2*math.pi*t1*f0*((r**(t/t1)-1)/(math.log(r, math.e))))*(1-math.e**(-window_strength*t))*(1-math.e**(window_strength*(t-t1)))
+
+
+    """Produces chirp and returns impulse characteristics"""
+    t_list = np.linspace(0, T, int(round(T * fs)), False)
+    profile = []
+    r = f2/f1
+    # Calculate Sine Sweep time domain values
+    for t in t_list:
+        value = math.sin(2*math.pi*T*f1*((r**(t/T)-1)/(math.log(r, math.e))))*(1-math.e**(-window_strength*t))*(1-math.e**(window_strength*(t-T)))
+        profile.append(value)
+    # Format
+    profile = np.array(profile)
+    return profile
