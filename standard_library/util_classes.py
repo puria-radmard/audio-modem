@@ -1,5 +1,8 @@
 import numpy as np
+from numpy.core.numeric import full
 import pandas as pd
+from scipy import interpolate
+from scipy.interpolate.polyint import KroghInterpolator
 from scipy.signal import convolve
 from typing import FrozenSet, List, Tuple
 from scipy.fft import fft, ifft
@@ -13,17 +16,34 @@ from visualisation_scripts import *
 import random
 from scipy.io.wavfile import read
 import matplotlib.pyplot as plt
+from scipy.interpolate import CubicSpline
 
 
 class Channel:
     def __init__(self, impulse_response: np.ndarray):
         self.impulse_response = impulse_response
 
-    def transmit(self, signal: np.ndarray) -> np.ndarray:
+    def transmit(self, signal: np.ndarray, noise = 0.01) -> np.ndarray:
         # Transmit sequence by convolving with impulse reponse
         echo = convolve(signal, self.impulse_response)[: len(signal)]
-        echo += np.random.randn(len(signal)) * 0.001
+        echo += np.random.randn(len(signal)) * noise
         return echo
+
+    def update_channel_impulse(self, new_impulse, new_weight):
+        self.impulse_response *= (1-new_weight)
+        self.impulse_response += new_weight * new_impulse
+
+    def update_channel_spectrum(self, new_spectrum, new_weight):
+        current_spectrum = self.transfer_function(len(new_spectrum))
+        updated_spectrum = (1-new_weight)*current_spectrum + new_weight*new_spectrum
+        new_impulse_response = ifft(updated_spectrum, len(self.impulse_response))
+        self.impulse_response = new_impulse_response
+        
+        fig, axs = plt.subplots(2)
+        axs[0].plot(self.impulse_response)
+        axs[1].plot(updated_spectrum.real)
+        fig.savefig("updated_channel")
+        
 
     def transfer_function(self, length: int) -> np.ndarray:
         return fft(self.impulse_response, length)
@@ -69,7 +89,7 @@ class Synchronisation:
         self.delay_after_peak = 2 * self.chirp_samples - peak_sample_idx
 
         self.total_post_peak_samples = (
-            self.delay_after_peak + self.num_OFDM_symbols_chirp * (N + L)
+            self.delay_after_peak + self.num_OFDM_symbols_chirp * (self.N + self.L)
         )
 
     def matched_filter(self, data):
@@ -130,7 +150,8 @@ class Synchronisation:
 
         if "pilot" in self.modes:
             post_pilot_constallation_values = []
-            for j, c in enumerate(constallation_values):
+            for c in constallation_values:
+                j = len(post_pilot_constallation_values)
                 if j not in self.pilot_idx:
                     post_pilot_constallation_values.extend([c])
                 else:
@@ -190,20 +211,24 @@ class Modulation:
                 )
         return frames
 
-    def data2OFDM(
-        self, bitstring: str, synchroniser: Synchronisation, return_frames=False
-    ) -> List[float]:
-
+    def get_bits_per_chunk(self, synchroniser, ignore_pilot = False):
         information_frequency_bins = (self.N / 2) - 1
-
         constellation_per_chunk = (
             information_frequency_bins
-            if "pilot" not in synchroniser.modes
+            if "pilot" not in synchroniser.modes or ignore_pilot
             else information_frequency_bins - synchroniser.num_pilots
         )  # account for pilot
         bits_per_chunk = int(
             constellation_per_chunk * self.constellation_length
         )  # number of constallation values
+        return bits_per_chunk
+
+    def data2OFDM(
+        self, bitstring: str, synchroniser: Synchronisation, return_frames=False
+    ) -> List[float]:
+        
+        bits_per_chunk = self.get_bits_per_chunk(synchroniser)
+
         OFDM_data = self.split_bitstring_into_chunks(bitstring, bits_per_chunk)
         OFDM_data = [
             self.bits2OFDM(OFDM_symbol, synchroniser) for OFDM_symbol in OFDM_data
@@ -233,6 +258,7 @@ class Demodulation:
         self.N = N
         self.L = L
         self.constellation = CONSTELLATIONS_DICT[constellation_name]
+        self.constellation_figs = []
 
     def OFDM2constellation(self, channel_output: np.ndarray, channel: Channel):
         num_frames = len(channel_output) / (self.N + self.L)
@@ -257,12 +283,15 @@ class Demodulation:
         const_hist = []
         for c in constellation_values:
             for d in c:
+                if np.isnan(d):
+                    continue
                 symbol_bits_sequence.extend(self.constellation2bits_single(d))
                 const_hist.extend([d])
         output_bitstring = "".join([str(a) for a in symbol_bits_sequence])
 
         if show:
-            constellation_plot(const_hist)
+            new_fig = constellation_plot(const_hist)
+            self.constellation_figs.append(new_fig)
 
         return output_bitstring
 
@@ -284,35 +313,13 @@ class Demodulation:
 
         if "chirp" in synchronisation.modes:
             chirp_filtered = synchronisation.matched_filter(channel_output)
-            chirp_slices = synchronisation.locate_chirp_slices(
-                chirp_filtered, sample_shift
-            )
+            chirp_slices = synchronisation.locate_chirp_slices(chirp_filtered, sample_shift)
             
         else:
-            raise NotImplementedError("Need chirp for synchronisation for now!")
-
-        if "pilot" in synchronisation.modes:
-            if channel == None:
-                raise ValueError("Need channel estimation (impulse) to synchronise with pilot tones")
-
-            fig = plt.figure()
-
-            for pre_pilot_slice in chirp_slices:
-                
-                pre_pilot_frames = channel_output[pre_pilot_slice]
-                freq_domain_OFDM_frame = self.OFDM2constellation(pre_pilot_frames, channel)
-
-                for ppf in freq_domain_OFDM_frame:
-                    recovered_pilot_tones = ppf[sync.pilot_idx]
-                
-                plt.scatter(recovered_pilot_tones.real, recovered_pilot_tones.imag)
-
-
-            
-            fig.savefig("pilot_rotation.png")
-
+            raise NotImplementedError("Need chirp for initial synchronisation for now!")
             
         chirp_frames = [channel_output[sl] for sl in chirp_slices]
+
         for frame in chirp_frames:
             new_frames = np.array_split(frame, len(frame) / (self.N + self.L))
             OFDM_frames.extend(new_frames)
@@ -326,16 +333,17 @@ class Demodulation:
         channel_output: np.ndarray,
         channel: Channel,
         synchronisation: Synchronisation,
+        sample_shift = 0
     ) -> str:
         
         ch = channel if 'pilot' in synchronisation.modes else None
-        OFDM_frames = self.receive_channel_output(channel_output, synchronisation, channel = ch)
+        OFDM_frames = self.receive_channel_output(channel_output, synchronisation, channel = ch, sample_shift=sample_shift)
 
         bitstring = ""
         for frame in OFDM_frames:
             deconvolved_frames = self.OFDM2constellation(frame, channel)
             deconvolved_frames = [dcf[1 : int(self.N / 2)] for dcf in deconvolved_frames]
-            bitstring += self.constellation2bits_sequence(deconvolved_frames, sync)
+            bitstring += self.constellation2bits_sequence(deconvolved_frames, synchronisation)
 
         return bitstring
 
@@ -344,21 +352,16 @@ class Estimation(Demodulation):
     def __init__(self, N: int, L: int, constellation_name: str):
         super().__init__(N, L, constellation_name)
 
-    def OFDM_channel_estimation(
-        self, channel_output, synchronisation, ground_truth_OFDM_frames, sample_shift
-    ):
-        received_OFDM_frames = self.receive_channel_output(
-            channel_output, synchronisation, sample_shift
-        )
-        
+    def transfer_function_trials(self, ground_truth_OFDM_frames, received_OFDM_frames):
+
         transfer_function_trials = []
 
         for j, ground_truth_OFDM_frame in enumerate(ground_truth_OFDM_frames):
-            output_spectrum = fft(received_OFDM_frames[j][self.L :])
             input_spectrum = fft(
                 ground_truth_OFDM_frame[self.L :]
             ).round()  # MAY NEED FIXING IF NOT ALWAYS USING INTEGERS
-            
+            output_spectrum = fft(received_OFDM_frames[j][self.L :])
+
             transfer_function = np.divide(output_spectrum, input_spectrum)
             
             # MIGHT NOT WORK FOR ODD N
@@ -367,15 +370,155 @@ class Estimation(Demodulation):
 
             transfer_function_trials.append(transfer_function)
 
+        return transfer_function_trials
+
+    def extract_average_impulse(self,transfer_function_trials):
+
+        fig, axs = plt.subplots(2)
+        for j, tf in enumerate(transfer_function_trials):
+            axs[0].plot(abs(tf))
+            axs[0].set_yscale('log')
+            axs[1].plot(ifft(tf))
+        
+        fig.savefig('all_tf_trials.png')
+
         average_transfer_function = np.mean(transfer_function_trials, 0)
         average_impulse = ifft(average_transfer_function)
 
         return average_impulse
+        
+
+    def OFDM_channel_estimation(
+        self, channel_output, synchronisation, ground_truth_OFDM_frames, sample_shift,
+    ):
+        received_OFDM_frames = self.receive_channel_output(
+            channel_output, synchronisation, sample_shift
+        )
+        
+        transfer_function_trials = self.transfer_function_trials(ground_truth_OFDM_frames, received_OFDM_frames)
+        return self.extract_average_impulse(transfer_function_trials)
+
+
+class Transmitter(Modulation):
+    def __init__(self, constellation_name: str, N: int, L: int, num_estimation_symbols, bits_filename, synchronisation):
+        super().__init__(constellation_name, N, L)
+        self.num_estimation_symbols = num_estimation_symbols
+        self.generate_estimation_random_bits(bits_filename, synchronisation)
+
+    def generate_estimation_random_bits(self, bits_filename, synchronisation):
+        
+        bits_per_chunk = self.get_bits_per_chunk(synchronisation)
+        num_estimation_bits = self.num_estimation_symbols * bits_per_chunk
+        random_bits = "{0:b}".format(random.getrandbits(num_estimation_bits))
+        with open(f"{bits_filename}.txt", "w") as f:
+            f.write(random_bits)
+        self.random_bits = random_bits
+        print(f"random bits written to {bits_filename}")
+
+    def full_pipeline(self, synchronisation, message_bits, OFDM_file_name):
+        
+        total_bits = self.random_bits + message_bits
+        OFDM_transmission, frames = self.data2OFDM(bitstring = total_bits, synchroniser=synchronisation, return_frames=True)
+        print(f"{len(frames)} total OFDM symbols generated, of which {self.num_estimation_symbols} are used for estimation")
+        self.publish_data(OFDM_transmission, OFDM_file_name)
+        print(f"OFDM data eith chirp and estimation symbols save to {OFDM_file_name}")
+        
+
+class Receiver(Estimation):
+    def __init__(self, N: int, L: int, constellation_name: str, num_estimation_symbols: int, num_message_symbols: int):
+        super().__init__(N, L, constellation_name)
+        self.num_estimation_symbols = num_estimation_symbols
+        self.num_message_symbols = num_message_symbols
+        self.pilot_sync_figs = []
+
+    def interpolate_and_update_channel(self, left_pilot_idx, right_pilot_idx, recovered_pilot_tones_left, recovered_pilot_tones_right, synchronisation, deconvolved_frames):
+
+        pilot_spectrum_left = recovered_pilot_tones_left / synchronisation.pilot_symbol
+        pilot_spectrum_right = recovered_pilot_tones_right / np.conj(synchronisation.pilot_symbol)
+
+        x = np.concatenate([[0], left_pilot_idx, [int(self.N/2)], right_pilot_idx]) / len(deconvolved_frames[0]) - 0.5
+        y = np.concatenate([[0+0j], pilot_spectrum_left, [0+0j], pilot_spectrum_right])
+
+        full_x = np.array(range(len(deconvolved_frames[0])))/len(deconvolved_frames[0]) - 0.5
+
+        interpolator = interpolate.interp1d(x, y)
+        full_pilot_spectrum = interpolator(full_x)
+
+        fig, axs = plt.subplots(1)
+        axs.plot(full_pilot_spectrum.real)
+        axs.scatter((x+ 0.5)*len(deconvolved_frames[0]) , y.real, c="orange")
+        fig.savefig("test.png")
+        
+        return full_pilot_spectrum
+
+    
+    def full_pipeline(
+        self, channel_output, synchronisation, ground_truth_estimation_OFDM_frames, sample_shift, new_weight
+    ):
+        received_OFDM_frames = self.receive_channel_output(channel_output, synchronisation, sample_shift)
+
+        estimation_ofdm_frames = received_OFDM_frames[:self.num_estimation_symbols]
+        message_ofdm_frames = received_OFDM_frames[self.num_estimation_symbols:self.num_message_symbols+self.num_estimation_symbols]
+        unused_frames = received_OFDM_frames[self.num_estimation_symbols+self.num_message_symbols:]
+
+        transfer_function_trials = self.transfer_function_trials(
+            ground_truth_estimation_OFDM_frames, estimation_ofdm_frames
+        )
+
+        impulse_response = self.extract_average_impulse(transfer_function_trials)
+        fig, axs = plt.subplots(1)
+        axs.set_title("Channel response via OFDM")
+        axs.set_xlabel("Sample number")
+        axs.set_ylabel("Impulse coeff")
+        axs.plot(impulse_response.real, label=f"no shift")       
+        fig.savefig("impulse_response_pipeline.png")
+
+        np.save("impulse_response_pipline", impulse_response.real) 
+        derived_channel = Channel(impulse_response.real)
+
+        bitstring = ""
+        for frame in message_ofdm_frames:
+            
+            # Get output spectrum
+            deconvolved_frames = self.OFDM2constellation(frame, derived_channel)
+            
+            # We group this with sync but this is for estimation mainly
+            if "pilot" in synchronisation.modes:
+
+                # Get the pilot tones, and remove them from the main one               
+                # TODO: FIX THIS FOR MULTIPLE FRAMES
+
+                left_pilot_idx = (synchronisation.pilot_idx[:-1]+1).astype(int)
+                right_pilot_idx = (self.N-synchronisation.pilot_idx[:-1]-1).astype(int)[::-1]
+
+                recovered_pilot_tones_left = deconvolved_frames[0][left_pilot_idx]
+                recovered_pilot_tones_right = deconvolved_frames[0][right_pilot_idx]
+
+                phase_shifts = [(np.angle(r) + np.angle(synchronisation.pilot_symbol))%(2*np.pi) for r in recovered_pilot_tones_left]
+
+                self.pilot_sync_figs.append(
+                    (left_pilot_idx, recovered_pilot_tones_left, phase_shifts, self.N)
+                )        
+
+                full_pilot_spectrum = self.interpolate_and_update_channel(
+                    left_pilot_idx, right_pilot_idx, recovered_pilot_tones_left, recovered_pilot_tones_right, 
+                    synchronisation, deconvolved_frames
+                )
+                
+                deconvolved_frames[0][(synchronisation.pilot_idx+1).astype(int)] = None
+                derived_channel.update_channel_spectrum(full_pilot_spectrum, new_weight)
+                
+            # Add to the bitstring as usual
+            deconvolved_frames = [dcf[1 : int(self.N / 2)] for dcf in deconvolved_frames]
+            bitstring += self.constellation2bits_sequence(deconvolved_frames, synchronisation)
+
+        return bitstring
 
 
 if __name__ == "__main__":
 
     channel_impulse = np.array(pd.read_csv("channel.csv", header=None)[0])
+
     artificial_channel_output = list(pd.read_csv("file1.csv", header=None)[0])
     text = """
         The Longest Text Ever An attempt at creating the longest wall of text ever written. Check out some other LTEs! Hello, everyone! This is the LONGEST TEXT EVER! I was inspired by the various other "longest texts ever" on the internet, and I wanted to make my own. So here it is! This is going to be a WORLD RECORD! This is actually my third attempt at doing this. The first time, I didn't save it. The second time, the Neocities editor crashed. Now I'm writing this in Notepad, then copying it into the Neocities editor instead of typing it directly in the Neocities editor to avoid crashing. It sucks that my past two attempts are gone now. Those actually got pretty long. Not the longest, but still pretty long. I hope this one won't get lost somehow. Anyways, let's talk about WAFFLES! I like waffles. Waffles are cool. Waffles is a funny word. There's a Teen Titans Go episode called "Waffles" where the word "Waffles" is said a hundred-something times. It's pretty annoying. There's also a Teen Titans Go episode about Pig Latin. Don't know what Pig Latin is? It's a language where you take all the consonants before the first vowel, move them to the end, and add '-ay' to the end. If the word begins with a vowel, you just add '-way' to the end. For example, "Waffles" becomes "Afflesway". I've been speaking Pig Latin fluently since the fourth grade, so it surprised me when I saw the episode for the first time. I speak Pig Latin with my sister sometimes. It's pretty fun. I like speaking it in public so that everyone around us gets confused. That's never actually happened before, but if it ever does, 'twill be pretty funny. By the way, "'twill" is a word I invented recently, and it's a contraction of "it will". I really hope it gains popularity in the near future, because "'twill" is WAY more fun than saying "it'll". "It'll" is too boring. Nobody likes boring. This is nowhere near being the longest text ever, but eventually it will be! I might still be writing this a decade later, who knows? But right now, it's not very long. But I'll just keep writing until it is the longest! Have you ever heard the song "Dau Dau" by Awesome Scampis? It's an amazing song. Look it up on YouTube! I play that song all the time around my sister! It drives her crazy, and I love it. Another way I like driving my sister crazy is by speaking my own made up language to her. She hates the languages I make! The only language that we both speak besides English is Pig Latin. I think you already knew that. Whatever. I think I'm gonna go for now. Bye! Hi, I'm back now. I'm gonna contribute more to this soon-to-be giant wall of text. I just realised I have a giant stuffed frog on my bed. I forgot his name. I'm pretty sure it was something stupid though. I think it was "FROG" in Morse Code or something. Morse Code is cool. I know a bit of it, but I'm not very good at it. I'm also not very good at French. I barely know anything in French, and my pronunciation probably sucks. But I'm learning it, at least. I'm also learning Esperanto. It's this language that was made up by some guy a long time ago to be the "universal language". A lot of people speak it. I am such a language nerd. Half of this text is probably gonna be about languages. But hey, as long as it's long! Ha, get it? As LONG as it's LONG? I'm so funny, right? No, I'm not. I should probably get some sleep. Goodnight! Hello, I'm back again. I basically have only two interests nowadays: languages and furries. What? Oh, sorry, I thought you knew I was a furry. Haha, oops. Anyway, yeah, I'm a furry, but since I'm a young furry, I can't really do as much as I would like to do in the fandom. When I'm older, I would like to have a fursuit, go to furry conventions, all that stuff. But for now I can only dream of that. Sorry you had to deal with me talking about furries, but I'm honestly very desperate for this to be the longest text ever. Last night I was watching nothing but fursuit unboxings. I think I need help. This one time, me and my mom were going to go to a furry Christmas party, but we didn't end up going because of the fact that there was alcohol on the premises, and that she didn't wanna have to be a mom dragging her son through a crowd of furries. Both of those reasons were understandable. Okay, hopefully I won't have to talk about furries anymore. I don't care if you're a furry reading this right now, I just don't wanna have to torture everyone else. I will no longer say the F word throughout the rest of this entire text. Of course, by the F word, I mean the one that I just used six times, not the one that you're probably thinking of which I have not used throughout this entire text. I just realised that next year will be 2020. That's crazy! It just feels so futuristic! It's also crazy that the 2010s decade is almost over. That decade brought be a lot of memories. In fact, it brought be almost all of my memories. It'll be sad to see it go. I'm gonna work on a series of video lessons for Toki Pona. I'll expain what Toki Pona is after I come back. Bye! I'm back now, and I decided not to do it on Toki Pona, since many other people have done Toki Pona video lessons already. I decided to do it on Viesa, my English code. Now, I shall explain what Toki Pona is. Toki Pona is a minimalist constructed language that has only ~120 words! That means you can learn it very quickly. I reccomend you learn it! It's pretty fun and easy! Anyway, yeah, I might finish my video about Viesa later. But for now, I'm gonna add more to this giant wall of text, because I want it to be the longest! It would be pretty cool to have a world record for the longest text ever. Not sure how famous I'll get from it, but it'll be cool nonetheless. Nonetheless. That's an interesting word. It's a combination of three entire words. That's pretty neat. Also, remember when I said that I said the F word six times throughout this text? I actually messed up there. I actually said it ten times (including the plural form). I'm such a liar! I struggled to spell the word "liar" there. I tried spelling it "lyer", then "lier". Then I remembered that it's "liar". At least I'm better at spelling than my sister. She's younger than me, so I guess it's understandable. "Understandable" is a pretty long word. Hey, I wonder what the most common word I've used so far in this text is. I checked, and appearantly it's "I", with 59 uses! The word "I" makes up 5% of the words this text! I would've thought "the" would be the most common, but "the" is only the second most used word, with 43 uses. "It" is the third most common, followed by "a" and "to". Congrats to those five words! If you're wondering what the least common word is, well, it's actually a tie between a bunch of words that are only used once, and I don't wanna have to list them all here. Remember when I talked about waffles near the beginning of this text? Well, I just put some waffles in the toaster, and I got reminded of the very beginnings of this longest text ever. Okay, that was literally yesterday, but I don't care. You can't see me right now, but I'm typing with my nose! Okay, I was not able to type the exclamation point with just my nose. I had to use my finger. But still, I typed all of that sentence with my nose! I'm not typing with my nose right now, because it takes too long, and I wanna get this text as long as possible quickly. I'm gonna take a break for now! Bye! Hi, I'm back again. My sister is beside me, watching me write in this endless wall of text. My sister has a new thing where she just says the word "poop" nonstop. I don't really like it. She also eats her own boogers. I'm not joking. She's gross like that. Also, remember when I said I put waffles in the toaster? Well, I forgot about those and I only ate them just now. Now my sister is just saying random numbers. Now she's saying that they're not random, they're the numbers being displayed on the microwave. Still, I don't know why she's doing that. Now she's making annoying clicking noises. Now she's saying that she's gonna watch Friends on three different devices. Why!?!?! Hi its me his sister. I'd like to say that all of that is not true. Max wants to make his own video but i wont let him because i need my phone for my alarm.POOP POOP POOP POOP LOL IM FUNNY. kjnbhhisdnhidfhdfhjsdjksdnjhdfhdfghdfghdfbhdfbcbhnidjsduhchyduhyduhdhcduhduhdcdhcdhjdnjdnhjsdjxnj Hey, I'm back. Sorry about my sister. I had to seize control of the LTE from her because she was doing keymash. Keymash is just effortless. She just went back to school. She comes home from school for her lunch break. I think I'm gonna go again. Bye! Hello, I'm back. Let's compare LTE's. This one is only 8593 characters long so far. Kenneth Iman's LTE is 21425 characters long. The Flaming-Chicken LTE (the original) is a whopping 203941 characters long! I think I'll be able to surpass Kenneth Iman's not long from now. But my goal is to surpass the Flaming-Chicken LTE. Actually, I just figured out that there's an LTE longer than the Flaming-Chicken LTE. It's Hermnerps LTE, which is only slightly longer than the Flaming-Chicken LTE, at 230634 characters. My goal is to surpass THAT. Then I'll be the world record holder, I think. But I'll still be writing this even after I achieve the world record, of course. One time, I printed an entire copy of the Bee Movie script for no reason. I heard someone else say they had three copies of the Bee Movie script in their backpack, and I got inspired. But I only made one copy because I didn't want to waste THAT much paper. I still wasted quite a bit of paper, though. Now I wanna see how this LTE compares to the Bee Movie script. Okay, I checked, and we need some filler characters to get thsi to 10000 characters total. There is some filler and space waster here, but not sure it will suffice. Might have to pull something really dodgy to get it to the target of, reprinted here for your benefit, 10000 (ten whole thousand) characters). OK!
@@ -388,12 +531,10 @@ if __name__ == "__main__":
     L = 1024
     T = 1.5
 
-    c_func = lambda t: chirp(t, f0=20000, f1=60, t1=T, method="logarithmic")
     c_func = lambda t: exponential_chirp(t, f0=60, f1=20000, t1=T)
     c_func = np.vectorize(c_func)
 
-
-    if sys.argv[1] == "demod":
+    if sys.argv[1] == "sim_demod":
         channel = Channel(channel_impulse)
         demodulation = Demodulation(N=N, L=L, constellation_name="gray")
         output_text = demodulation.OFDM2bits(artificial_channel_output, channel)
@@ -406,7 +547,7 @@ if __name__ == "__main__":
             chirp_func=c_func,
             N=N,
             L=L,
-            num_OFDM_symbols_chirp=80,
+            num_OFDM_symbols_chirp=10,
         )
 
         modulator = Modulation(constellation_name="gray", N=N, L=L)
@@ -423,15 +564,18 @@ if __name__ == "__main__":
         print(output_text)
 
     elif sys.argv[1] == "OFDM_estimation":
-        c_func = lambda t: chirp(t, f0=20000, f1=60, t1=T, method="logarithmic")
+        # c_func = lambda t: chirp(t, f0=20000, f1=60, t1=T, method="logarithmic")
+
         sync = Synchronisation(
             ["chirp"],
             chirp_length=T,
             chirp_func=c_func,
             N=N,
             L=L,
-            num_OFDM_symbols_chirp=20,
+            num_OFDM_symbols_chirp=10,
         )
+        sd.play(sync.chirp, 44100)
+        sd.wait()
 
         modulator = Modulation(constellation_name="gray", N=N, L=L)
         estimator = Estimation(constellation_name="gray", N=N, L=L)
@@ -444,7 +588,9 @@ if __name__ == "__main__":
         modulator.publish_data(OFDM_transmission, "asf")
 
         channel_output_real = np.load("george_recording.npy").reshape(-1)
-        channel_output_simulated = channel.transmit(OFDM_transmission)
+        sd.play(channel_output_real, 44100)
+        sd.wait() 
+        # channel_output_simulated = channel.transmit(OFDM_transmission)
 
         impulse_responses = []
         fig, axs = plt.subplots(1)
@@ -470,14 +616,14 @@ if __name__ == "__main__":
                 ground_truth_OFDM_frames=OFDM_data,
                 sample_shift=shift,
             )
-            axs[0].plot(average_impulse_real.real, label=f"{shift} samples")            
+            axs[0].plot(average_impulse_real.real, label=f"{shift} samples")       
+            np.save("yday_impulse_response", average_impulse_real.real[:1000])     
 
         fig.legend()
         fig.savefig("OFDM_estimation_shifts_trial.png")
 
     elif sys.argv[1] == "pilot_sync":
 
-        c_func = lambda t: chirp(t, f0=20000, f1=60, t1=T, method="logarithmic")
         sync = Synchronisation(
             ["chirp", "pilot"],
             pilot_idx=np.arange(0, 1024, 8),
@@ -505,3 +651,23 @@ if __name__ == "__main__":
         for shift in [0]:  # range(0, 3):
 
             output_text = demodulation.OFDM2bits(channel_output, channel, sync)
+
+    elif sys.argv[1] == "real_demod":
+
+        real_channel_impulse = np.load("yday_impulse_response.npy")
+        channel = Channel(real_channel_impulse)
+        demodulation = Demodulation(N=N, L=L, constellation_name="gray")
+        sync = Synchronisation(
+            ["chirp"],
+            chirp_length=T,
+            chirp_func=c_func,
+            N=N,
+            L=L,
+            num_OFDM_symbols_chirp=10,
+        )
+
+        channel_output = np.load("george_recording.npy").reshape(-1)
+
+        output_bits = demodulation.OFDM2bits(channel_output, channel, sync)
+        output_text = bitlist_to_s([int(i) for i in list(output_bits)])
+        print(output_text)

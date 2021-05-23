@@ -7,7 +7,6 @@ from tempfile import TemporaryFile
 import sys
 
 outfile = TemporaryFile()
-noise = np.random.normal(0,1,44100*10)
 fs=44100
 duration = 10 # seconds
 myrecording = sd.rec(int(duration * fs), samplerate=fs, channels=1)
