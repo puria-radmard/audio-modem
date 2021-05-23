@@ -62,8 +62,34 @@ def generate_phaseshifting_video(folder, img, animation_name, pilot_symbol):
     video.release()
 
     for file_name in glob.glob(f"{folder}/pilotestimationrotation*.png"):
-        pass#os.remove(file_name)
+        os.remove(file_name)
+
+
+def generate_channel_estim_video(folder, channel, animation_name):
     
+    frames = []
+
+    for j, impulse in enumerate(channel.past_impulses):
+        fig, axs = plt.subplots(2)
+        axs[0].plot(impulse)
+        axs[1].plot(channel.past_spectra[j])
+
+        fig.savefig(f"{folder}/updated_channel{j}.png")
+        frames.append(f"{folder}/updated_channel{j}.png")
+    
+    frame = cv2.imread(frames[0])
+    height, width, layers = frame.shape
+    video = cv2.VideoWriter(f"{folder}/{animation_name}.avi", cv2.VideoWriter_fourcc(*'XVID'), 1.5, (width,height)) 
+
+    for image in frames:
+        video.write(cv2.imread(image))
+
+    cv2.destroyAllWindows()
+    video.release()
+
+    for file_name in glob.glob(f"{folder}/updated_channel*.png"):
+        os.remove(file_name) 
+
 
 def constellation_plot(const_hist):
     fig, axs = plt.subplots(1)

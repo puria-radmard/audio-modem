@@ -23,6 +23,8 @@ import commpy.channelcoding as cc
 class Channel:
     def __init__(self, impulse_response: np.ndarray):
         self.impulse_response = impulse_response
+        self.past_spectra = [self.transfer_function(len(impulse_response))]
+        self.past_impulses = [impulse_response]
 
     def transmit(self, signal: np.ndarray, noise = 0.01) -> np.ndarray:
         # Transmit sequence by convolving with impulse reponse
@@ -39,11 +41,9 @@ class Channel:
         updated_spectrum = (1-new_weight)*current_spectrum + new_weight*new_spectrum
         new_impulse_response = ifft(updated_spectrum, len(self.impulse_response))
         self.impulse_response = new_impulse_response
-        
-        fig, axs = plt.subplots(2)
-        axs[0].plot(self.impulse_response)
-        axs[1].plot(updated_spectrum.real)
-        fig.savefig("updated_channel")
+
+        self.past_impulses.append(new_impulse_response)
+        self.past_spectra.append(updated_spectrum)
         
 
     def transfer_function(self, length: int) -> np.ndarray:
@@ -495,7 +495,8 @@ class Receiver(Estimation):
                 recovered_pilot_tones_left = deconvolved_frames[0][left_pilot_idx]
                 recovered_pilot_tones_right = deconvolved_frames[0][right_pilot_idx]
 
-                phase_shifts = [(np.angle(r) + np.angle(synchronisation.pilot_symbol))%(2*np.pi) for r in recovered_pilot_tones_left]
+                get_phase = lambda x: np.angle(x)#   if np.angle(x) < 0 else -2*np.pi + np.angle(x)
+                phase_shifts = [(get_phase(r) + np.angle(synchronisation.pilot_symbol))%(2*np.pi) for r in recovered_pilot_tones_left]
 
                 self.pilot_sync_figs.append(
                     (left_pilot_idx, recovered_pilot_tones_left, phase_shifts, self.N)
@@ -513,7 +514,7 @@ class Receiver(Estimation):
             deconvolved_frames = [dcf[1 : int(self.N / 2)] for dcf in deconvolved_frames]
             bitstring += self.constellation2bits_sequence(deconvolved_frames, synchronisation)
 
-        return bitstring
+        return bitstring, derived_channel
 
     
 class Encoding:

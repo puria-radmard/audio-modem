@@ -7,11 +7,14 @@ from tempfile import TemporaryFile
 import numpy as np
 import pandas as pd
 from testing_script import get_OFDM_data_from_bits
-from visualisation_scripts import generate_constellation_video, generate_phaseshifting_video
+from visualisation_scripts import generate_constellation_video, generate_phaseshifting_video, generate_channel_estim_video
+from matplotlib.cbook.deprecation import MatplotlibDeprecationWarning
 
 import warnings
 warnings.simplefilter('ignore', np.ComplexWarning)
 warnings.simplefilter('ignore', RuntimeWarning)
+warnings.simplefilter('ignore', MatplotlibDeprecationWarning)
+
 
 fs=44100
 recording_duration = 15 # seconds
@@ -59,16 +62,15 @@ elif sys.argv[1] == 'receive':
     modu = Modulation("gray", N, L)
 
     ground_truth_estimation_OFDM_frames = get_OFDM_data_from_bits(modu, sync, source_bits = "full_pipeline_random_bits")
-    for nw in [0.1]:#[0.05, 0.1, 0.2]:#[0, 0.05, 0.1, 0.15, 0.2, 0.25]:
-        received_bitstring = receiver.full_pipeline(
+    for nw in [0, 0.05, 0.1, 0.15, 0.2, 0.25]:
+        received_bitstring, inferred_channel = receiver.full_pipeline(
             channel_output, sync, ground_truth_estimation_OFDM_frames, sample_shift = 0, new_weight = nw
         )
         error_rate = 1-sum(text_bits[i] == received_bitstring[i] for i in range(len(text_bits)))/len(text_bits)
         print(nw, error_rate)
         generate_constellation_video("videos_sunday", receiver.constellation_figs, f"constalletion_nopilotsync_nw{nw}")
-        generate_phaseshifting_video("videos_sunday", receiver.pilot_sync_figs, f"pilotphaseshift_nopilotsync_nw{nw}", sync.pilot_symbol)
-        break
-        
+        generate_phaseshifting_video("videos_sunday", receiver.pilot_sync_figs, f"pilotphaseshift_nopilotsync_nw{nw}", sync.pilot_symbol)        
+        generate_channel_estim_video("videos_sunday", inferred_channel, f"channelupdates_nopilotsync_nw{nw}")        
 
     output_text = bitlist_to_s([int(r) for r in list(received_bitstring)])
     print(output_text)
