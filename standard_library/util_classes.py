@@ -17,6 +17,7 @@ import random
 from scipy.io.wavfile import read
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
+import commpy.channelcoding as cc
 
 
 class Channel:
