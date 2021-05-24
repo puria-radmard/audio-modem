@@ -514,6 +514,54 @@ class Receiver(Estimation):
 
         return bitstring
 
+    
+class Encoding:
+    def __init__(self):
+        pass
+
+    def encode(self, inputs):
+        raise NotImplementedError("Need to specify coding type")
+
+    def enc_func(self):
+        print("we did not define this for ConvCoding, but it can still be used by it")
+        
+
+# This is a rate 1/2 convolutional code
+class ConvCoding(Encoding):
+    def __init__(self, g_matrix = np.array([[0o5, 0o7]])):
+        super().__init__(self)
+        self.g_matrix = g_matrix
+
+    def encode(self, inputs: np.ndarray, m: int = 2):
+        memory = np.array([m])
+        trellis = cc.convcode.Trellis(memory, self.g_matrix)
+        outputs = cc.conv_encode(inputs, trellis)
+        return outputs
+
+    
+class Decoding:
+    def __init__(self):
+        pass
+
+    def encode(self, outputs):
+        raise NotImplementedError("Need to specify decoding type")
+
+    def enc_func(self):
+        print("we did not define this for ConvDecoding, but it can still be used by it")
+
+# This is for decoding a rate 1/2 convolutional code
+class ConvDecoding(Decoding):
+    def __init__(self, g_matrix = np.array([[0o5, 0o7]])):
+        super().__init__(self)
+        self.g_matrix = g_matrix
+
+    def encode(inputs: np.ndarray, m: int = 2):
+        memory = np.array([m])
+        trellis = cc.convcode.Trellis(memory, self.g_matrix)
+        decoded = cc.viterbi_decode(self.outputs, trellis)[:-m]
+        return decoded
+    
+    
 
 if __name__ == "__main__":
 
