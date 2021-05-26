@@ -1,3 +1,4 @@
+import pdb
 import numpy as np
 from numpy.core.numeric import full
 import pandas as pd
@@ -18,6 +19,7 @@ from scipy.io.wavfile import read
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 import commpy.channelcoding as cc
+from sklearn.linear_model import LinearRegression
 
 
 class Channel:
@@ -260,15 +262,16 @@ class Demodulation:
         self.L = L
         self.constellation = CONSTELLATIONS_DICT[constellation_name]
         self.constellation_figs = []
+        self.pre_rot_constallation_figs = []
 
     def OFDM2constellation(self, channel_output: np.ndarray, channel: Channel):
         num_frames = len(channel_output) / (self.N + self.L)
         with_cyclic_frames = np.array_split(channel_output, num_frames)
         message_frames = [list(w[self.L :]) for w in with_cyclic_frames]
         fft_frames = [fft(m, self.N) for m in message_frames]
-
         channel_TF = channel.transfer_function(self.N)
-        deconvolved_frames = [np.divide(r, channel_TF)for r in fft_frames]
+        deconvolved_frames = [np.divide(r, channel_TF) for r in fft_frames]
+        
         return deconvolved_frames
 
     def constellation2bits_single(self, constellation_value: float) -> Tuple[int]:
@@ -278,21 +281,25 @@ class Demodulation:
         )
 
     def constellation2bits_sequence(
-        self, constellation_values: List[float], synchronisation, show=True
+        self, constellation_values: List[float], synchronisation, constellation_values_pre_rot, show=True
     ) -> str:
         symbol_bits_sequence = []
         const_hist = []
-        for c in constellation_values:
-            for d in c:
+        const_hist_pre_rot = []
+        for i, c in enumerate(constellation_values):
+            for j, d in enumerate(c):
                 if np.isnan(d):
                     continue
                 symbol_bits_sequence.extend(self.constellation2bits_single(d))
                 const_hist.extend([d])
+                const_hist_pre_rot.extend([constellation_values_pre_rot[i][j]])
         output_bitstring = "".join([str(a) for a in symbol_bits_sequence])
 
         if show:
-            new_fig = constellation_plot(const_hist)
+            new_fig = np.array(const_hist) #new_fig = constellation_plot(const_hist)
+            new_fig_pre_rot = np.array(const_hist_pre_rot) #new_fig_pre_rot = constellation_plot(const_hist_pre_rot)
             self.constellation_figs.append(new_fig)
+            self.pre_rot_constallation_figs.append(new_fig_pre_rot)
 
         return output_bitstring
 
@@ -307,10 +314,11 @@ class Demodulation:
         channel_output: np.ndarray,
         synchronisation: Synchronisation,
         sample_shift=0,
-        channel = None
+        return_as_slices=False
     ):
 
         OFDM_frames = []
+        OFDM_slices = []
 
         if "chirp" in synchronisation.modes:
             chirp_filtered = synchronisation.matched_filter(channel_output)
@@ -318,16 +326,30 @@ class Demodulation:
             
         else:
             raise NotImplementedError("Need chirp for initial synchronisation for now!")
-            
-        chirp_frames = [channel_output[sl] for sl in chirp_slices]
 
-        for frame in chirp_frames:
-            new_frames = np.array_split(frame, len(frame) / (self.N + self.L))
-            OFDM_frames.extend(new_frames)
+        slice_lengths = [int(sl.stop - sl.start) for sl in chirp_slices]
+        for j, sl in enumerate(slice_lengths):
+            sl_length = slice_lengths[j]
+            num_symbols_in_slice = int(sl_length / (self.N + self.L))
+            symbols_in_slices = [
+                slice(int(i*(self.N + self.L)) + chirp_slices[j].start, int((i+1)*(self.N + self.L)) + chirp_slices[j].start)
+                for i in range(num_symbols_in_slice)
+            ]
+
+            OFDM_slices.extend(symbols_in_slices)
+
+        # chirp_frames = `[channel_output[sl] for sl in chirp_slices]`
+        # for frame in chirp_frames:
+        #     new_frames = np.array_split(frame, len(frame) / (self.N + self.L))
+        #     OFDM_frames.extend(new_frames)
 
         chirp_frame_location_plot(channel_output, chirp_filtered, chirp_slices)
+        OFDM_frames = [channel_output[sl] for sl in OFDM_slices]
 
-        return OFDM_frames
+        if return_as_slices:
+            return OFDM_slices        
+        else:
+            return OFDM_frames
 
     def OFDM2bits(
         self,
@@ -446,25 +468,68 @@ class Receiver(Estimation):
         full_pilot_spectrum = interpolator(full_x)
 
         fig, axs = plt.subplots(1)
-        axs.plot(full_pilot_spectrum.real)
+        axs.plot(abs(full_pilot_spectrum.real))
         axs.scatter((x+ 0.5)*len(deconvolved_frames[0]) , y.real, c="orange")
+        axs.set_yscale('log')
         fig.savefig("test.png")
         
         return full_pilot_spectrum
 
-    
+    def get_pilot_idx(self, synchronisation):
+        left_pilot_idx = (synchronisation.pilot_idx[:-1]+1).astype(int)
+        right_pilot_idx = (self.N-synchronisation.pilot_idx[:-1]-1).astype(int)[::-1]
+        return left_pilot_idx, right_pilot_idx
+
+    def get_recovered_pilot_tones(self, deconvolved_frames, left_pilot_idx, right_pilot_idx):
+        recovered_pilot_tones_left = deconvolved_frames[0][left_pilot_idx]
+        recovered_pilot_tones_right = deconvolved_frames[0][right_pilot_idx]
+        return recovered_pilot_tones_left, recovered_pilot_tones_right
+
+    def get_left_phase_shifts(self, synchronisation, recovered_pilot_tones_left):
+        get_phase = lambda x: np.angle(x)#   if np.angle(x) < 0 else -2*np.pi + np.angle(x)
+        phase_shifts = [get_phase(r) + np.angle(synchronisation.pilot_symbol) for r in recovered_pilot_tones_left]
+        return phase_shifts
+
+    def linear_regression_offset(self, left_pilot_idx, phase_shifts):
+        asf = np.delete(phase_shifts, 25)
+        asf2 = np.delete(left_pilot_idx, 25)
+        # model = LinearRegression().fit(left_pilot_idx[1:, np.newaxis], phase_shifts[1:])
+        model = LinearRegression().fit(asf2[1:, np.newaxis], asf[1:])
+        slope = model.coef_[0]
+        return slope
+
+    def fix_constellation_frame(self, deconvolved_frame, lin_reg_slope, pilot_idx):
+        complex_array = np.exp(1j * lin_reg_slope * np.array(range(len(deconvolved_frame))).astype(complex))
+        new_const = deconvolved_frame / complex_array
+
+        fig, axs = plt.subplots(2)
+        axs[0].set_xlim(-2, 2)
+        axs[0].set_ylim(-2, 2)
+        axs[0].set_title("Before rotation")
+
+        axs[1].set_xlim(-2, 2)
+        axs[1].set_ylim(-2, 2)
+        axs[1].set_title("After rotation")
+
+        data0 = deconvolved_frame[1:int(self.N/2)]
+        data1 = new_const[1:int(self.N/2)]
+
+        axs[0].scatter(data0.real, data0.imag, c = range(len(data0)))
+        axs[1].scatter(data1.real, data1.imag, c = range(len(data1)))
+
+        # import pdb; pdb.set_trace() # fig.savefig("rotation_test")
+        return deconvolved_frame / np.exp(1j * lin_reg_slope * np.array(range(len(deconvolved_frame))).astype(complex))
+
     def full_pipeline(
         self, channel_output, synchronisation, ground_truth_estimation_OFDM_frames, sample_shift, new_weight
     ):
-        received_OFDM_frames = self.receive_channel_output(channel_output, synchronisation, sample_shift)
+        received_OFDM_slices = self.receive_channel_output(channel_output, synchronisation, sample_shift, return_as_slices=True)
+        estimation_ofdm_slices = received_OFDM_slices[:self.num_estimation_symbols]
+        message_ofdm_slices = received_OFDM_slices[self.num_estimation_symbols:self.num_message_symbols+self.num_estimation_symbols]
+        unused_slices = received_OFDM_slices[self.num_estimation_symbols+self.num_message_symbols:]
 
-        estimation_ofdm_frames = received_OFDM_frames[:self.num_estimation_symbols]
-        message_ofdm_frames = received_OFDM_frames[self.num_estimation_symbols:self.num_message_symbols+self.num_estimation_symbols]
-        unused_frames = received_OFDM_frames[self.num_estimation_symbols+self.num_message_symbols:]
-
-        transfer_function_trials = self.transfer_function_trials(
-            ground_truth_estimation_OFDM_frames, estimation_ofdm_frames
-        )
+        estimation_ofdm_frames = [channel_output[sl] for sl in estimation_ofdm_slices]
+        transfer_function_trials = self.transfer_function_trials(ground_truth_estimation_OFDM_frames, estimation_ofdm_frames)
 
         impulse_response = self.extract_average_impulse(transfer_function_trials)
         fig, axs = plt.subplots(1)
@@ -478,41 +543,39 @@ class Receiver(Estimation):
         derived_channel = Channel(impulse_response.real)
 
         bitstring = ""
-        for frame in message_ofdm_frames:
+
+        total_offset = 0
+        for o_idx, ofdm_slice in enumerate(message_ofdm_slices):
             
-            # Get output spectrum
+            # Get output spectrum wihtout offset
+            offset_slice = slice(ofdm_slice.start + total_offset, ofdm_slice.stop + total_offset)
+            frame = channel_output[offset_slice]
             deconvolved_frames = self.OFDM2constellation(frame, derived_channel)
+            old_deconvolved_frames = deconvolved_frames.copy()
             
             # We group this with sync but this is for estimation mainly
             if "pilot" in synchronisation.modes:
 
                 # Get the pilot tones, and remove them from the main one               
                 # TODO: FIX THIS FOR MULTIPLE FRAMES
+                left_pilot_idx, right_pilot_idx = self.get_pilot_idx(synchronisation)
+                recovered_pilot_tones_left, recovered_pilot_tones_right = self.get_recovered_pilot_tones(deconvolved_frames, left_pilot_idx, right_pilot_idx)
+                phase_shifts = self.get_left_phase_shifts(synchronisation, recovered_pilot_tones_left)                
+                lin_reg_slope = self.linear_regression_offset(left_pilot_idx, phase_shifts)
+                deconvolved_frames = [self.fix_constellation_frame(d, lin_reg_slope, left_pilot_idx) for d in deconvolved_frames]
 
-                left_pilot_idx = (synchronisation.pilot_idx[:-1]+1).astype(int)
-                right_pilot_idx = (self.N-synchronisation.pilot_idx[:-1]-1).astype(int)[::-1]
-
-                recovered_pilot_tones_left = deconvolved_frames[0][left_pilot_idx]
-                recovered_pilot_tones_right = deconvolved_frames[0][right_pilot_idx]
-
-                get_phase = lambda x: np.angle(x)#   if np.angle(x) < 0 else -2*np.pi + np.angle(x)
-                phase_shifts = [(get_phase(r) + np.angle(synchronisation.pilot_symbol))%(2*np.pi) for r in recovered_pilot_tones_left]
-
-                self.pilot_sync_figs.append(
-                    (left_pilot_idx, recovered_pilot_tones_left, phase_shifts, self.N)
-                )        
-
+                self.pilot_sync_figs.append((left_pilot_idx, recovered_pilot_tones_left, phase_shifts, self.N))        
                 full_pilot_spectrum = self.interpolate_and_update_channel(
                     left_pilot_idx, right_pilot_idx, recovered_pilot_tones_left, recovered_pilot_tones_right, 
                     synchronisation, deconvolved_frames
                 )
-                
+
                 deconvolved_frames[0][(synchronisation.pilot_idx+1).astype(int)] = None
                 derived_channel.update_channel_spectrum(full_pilot_spectrum, new_weight)
                 
             # Add to the bitstring as usual
             deconvolved_frames = [dcf[1 : int(self.N / 2)] for dcf in deconvolved_frames]
-            bitstring += self.constellation2bits_sequence(deconvolved_frames, synchronisation)
+            bitstring += self.constellation2bits_sequence(deconvolved_frames, synchronisation, old_deconvolved_frames)
 
         return bitstring, derived_channel
 
@@ -696,7 +759,6 @@ if __name__ == "__main__":
 
         # channel_output = np.load("output.npy").reshape(-1)
         channel_output = channel.transmit(OFDM_transmission)
-        print("ASDF")
 
         for shift in [0]:  # range(0, 3):
 

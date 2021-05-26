@@ -6,16 +6,25 @@ import glob
 import matplotlib.animation as animation
 
 
-def generate_constellation_video(folder, img, animation_name):
+def generate_constellation_video(folder, img, img_pre_rot, animation_name):
 
     frames = []
 
     for i in range(len(img)):
-        arr = img[i]        
-        fig, axs = plt.subplots(1)
-        axs.set_xlim(-2, 2)
-        axs.set_ylim(-2, 2)
-        axs.scatter(arr.real, arr.imag)
+        arr = img[i]       
+        arr_pre_rot = img_pre_rot[i] 
+    
+        fig, axs = plt.subplots(2, figsize = (6, 12))
+        axs[0].set_xlim(-2, 2)
+        axs[0].set_ylim(-2, 2)
+        axs[1].set_xlim(-2, 2)
+        axs[1].set_ylim(-2, 2)
+
+        axs[1].scatter(arr.real, arr.imag, c = np.array(range(len(arr))))
+        axs[1].set_title("After phase correction")
+        axs[0].scatter(arr_pre_rot.real, arr_pre_rot.imag, c= np.array(range(len(arr_pre_rot))))
+        axs[0].set_title("Before phase correction")
+        
         fig.savefig(folder + "/file%02d" % i)
         frames.append(folder + "/file%02d.png" % i)
     
@@ -72,7 +81,10 @@ def generate_channel_estim_video(folder, channel, animation_name):
     for j, impulse in enumerate(channel.past_impulses):
         fig, axs = plt.subplots(2)
         axs[0].plot(impulse)
-        axs[1].plot(channel.past_spectra[j])
+        axs[1].plot(abs(channel.past_spectra[j]))
+        axs[1].set_yscale('log')
+
+        axs[1].set_ylim(sorted(abs(channel.past_spectra[j]))[2], sorted(abs(channel.past_spectra[j]))[-1])
 
         fig.savefig(f"{folder}/updated_channel{j}.png")
         frames.append(f"{folder}/updated_channel{j}.png")
