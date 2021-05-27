@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 import commpy.channelcoding as cc
 from sklearn.linear_model import LinearRegression
+import ldpc
 
 
 class Channel:
@@ -603,12 +604,32 @@ class ConvCoding(Encoding):
         outputs = cc.conv_encode(inputs, trellis)
         return outputs
 
+
+class LDPCCoding(Encoding):
+    def __init__(self, standard, rate, z, ptype):
+        super().__init__(self)
+        self.mycode = ldpc.code(standard, rate, z, ptype)
+    
+    def encode(self, inputs:np.ndarry):
+        s = len(inputs)
+        ceiling = np.ceil(s/ self.mycode.K)
+        pad = np.random.randint(2, size = int(ceiling * self.mycode.K - s))
+        padded_inputs = np.concatenate((inputs, pad))
+        padded_inputs_split = np.split(padded_inputs, ceiling)
+        ldpc_coded = []
+        for i in range(int(ceiling)):
+            coded = self.mycode.encode(padded_inputs_split[i])
+            ldpc_coded.append(coded)
+        encoded_message = np.ravel(ldpc_coded)
+        return encoded_message
+
+
     
 class Decoding:
     def __init__(self):
         pass
 
-    def encode(self, outputs):
+    def decode(self, outputs):
         raise NotImplementedError("Need to specify decoding type")
 
     def enc_func(self):
@@ -620,11 +641,60 @@ class ConvDecoding(Decoding):
         super().__init__(self)
         self.g_matrix = g_matrix
 
-    def encode(inputs: np.ndarray, m: int = 2):
+    def decode(self, outputs: np.ndarray, m: int = 2):
         memory = np.array([m])
         trellis = cc.convcode.Trellis(memory, self.g_matrix)
-        decoded = cc.viterbi_decode(self.outputs, trellis)[:-m]
+        decoded = cc.viterbi_decode(outputs, trellis)[:-m]
         return decoded
+
+
+class LDPCDecoding(Decoding):
+    def __init__(self, standard, rate, z, ptype):
+        super().__init__(self)
+        self.mycode = ldpc.code(standard, rate, z, ptype)
+    
+    def decode(self, outputs:np.ndarry, received_constellation, channel_estimation, s: int):
+        ckarraylen = int(len(channel_estimation)/2 -1)
+        ckarray = channel_estimation [1:1+ckarraylen]
+        llr = []
+        for i in range(len(received_constellation[0])):
+        # take sigma squared to be 1 as they do not affect the results
+            yir = received_constellation[0][i].real
+            yii = received_constellation[0][i].imag
+            ckindex = i % ckarraylen
+            ck = ckarray[ckindex]
+            ck_squared = ck * np.conjugate(ck)
+            ck2 = ck_squared.real
+            li2 = np.sqrt(2) * ck2 * yir
+            li1 = np.sqrt(2) * ck2 * yii
+            # Gray coding
+            llr.append(li1) 
+            llr.append(li2)
+
+        # each segmented component is of length mycode.N
+        ceiling = int(len(llr)/ self.mycode.N)
+        llr_split = np.split(np.array(llr), ceiling)
+
+        llr_ldpc_decoded = []
+        for i in range(len(llr_split)):
+            app, it = self.mycode.decode(llr_split[i])
+            app_half = app[:self.mycode.K]
+            llr_ldpc_decoded.append(app_half)
+
+        llr_ravel = np.ravel(llr_ldpc_decoded)
+
+        decoded_message = []
+        for i in llr_ravel:
+            if i > 0:
+                decoded_bit = 0
+            else:
+                decoded_bit = 1
+            decoded_message.append(decoded_bit)
+
+        decoded_message_trimmed = decoded_message[:s]
+        return decoded_message_trimmed
+    
+
     
     
 
