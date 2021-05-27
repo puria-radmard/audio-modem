@@ -1,4 +1,6 @@
 from os import error
+
+from numpy.testing._private.utils import print_assert_equal
 from util_classes import Modulation, Transmitter, Receiver, Synchronisation, Channel
 import sys
 from util_objects import *
@@ -67,7 +69,7 @@ elif sys.argv[1] == 'receive':
     modu = Modulation("gray", N, L)
 
     ground_truth_estimation_OFDM_frames = get_OFDM_data_from_bits(modu, sync, source_bits = f"full_pipeline_random_bits{reader_idx}")
-    for nw in [0, 0.05]:#, 0.1, 0.15, 0.2, 0.25]:
+    for nw in [0]:#, 0.1, 0.15, 0.2, 0.25]:
         received_bitstring, inferred_channel = receiver.full_pipeline(
             channel_output, sync, ground_truth_estimation_OFDM_frames, sample_shift = 0, new_weight = nw
         )
@@ -77,10 +79,11 @@ elif sys.argv[1] == 'receive':
         error_rate = 1-sum(text_bits[i] == received_bitstring[i] for i in range(len(text_bits)))/len(text_bits)        
         print(nw, error_rate)
         if not nw:
-            generate_constellation_video(video_folder_name, receiver.constellation_figs, receiver.pre_rot_constallation_figs, f"constalletion_withpilotsync_nw{nw}")
+            pass
+            # generate_constellation_video(video_folder_name, receiver.constellation_figs, receiver.pre_rot_constallation_figs, f"constalletion_withpilotsync_nw{nw}")
         #generate_phaseshifting_video(video_folder_name, receiver.pilot_sync_figs, f"pilotphaseshift_withpilotsync_nw{nw}", sync.pilot_symbol)        
-        generate_channel_estim_video(video_folder_name, inferred_channel, f"channelupdates_nopilotsync_nw{nw}") 
-        import pdb; pdb.set_trace()  
+        #generate_channel_estim_video(video_folder_name, inferred_channel, f"channelupdates_nopilotsync_nw{nw}") 
+        # import pdb; pdb.set_trace()  
 
     
     output_text = bitlist_to_s([int(r) for r in list(received_bitstring[:len(text_bits)])])

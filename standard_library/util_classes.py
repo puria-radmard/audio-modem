@@ -18,7 +18,7 @@ import random
 from scipy.io.wavfile import read
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
-import commpy.channelcoding as cc
+#import commpy.channelcoding as cc
 from sklearn.linear_model import LinearRegression
 import ldpc
 
