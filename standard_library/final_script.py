@@ -1,7 +1,7 @@
 from os import error
 
 from numpy.testing._private.utils import print_assert_equal
-from util_classes import Modulation, Transmitter, Receiver, Synchronisation, Channel
+from util_classes import Modulation, Transmitter, Receiver, Synchronisation, LDPCCoding, LDPCDecoding, Channel
 import sys
 from util_objects import *
 import sounddevice as sd
@@ -35,6 +35,7 @@ text_bits = "".join([str(s) for s in s_to_bitlist(message)])
 sync = Synchronisation(["chirp", "pilot"], pilot_idx=np.arange(0, N/2, 32), pilot_symbol=-1 - 1j,chirp_length=T, chirp_func=c_func, N=N, L=L, num_OFDM_symbols_chirp=71)
 # sync = Synchronisation(["chirp"], chirp_length=T, chirp_func=c_func, N=N, L=L, num_OFDM_symbols_chirp=71)
 
+
 try:
     reader_idx = sys.argv[-1]
 except:
@@ -58,13 +59,13 @@ elif sys.argv[1] == 'receive':
     # myrecording = np.mean(myrecording, 1)
     # np.save(recording_file, myrecording)
     # print("recording done!")
-    channel_output = np.load(f"{recording_file}.npy").reshape(-1)
+    # channel_output = np.load(f"{recording_file}.npy").reshape(-1)
     # channel_output = np.load(f"iPad_trial1.npy").reshape(-1)
 
-    # artificial_channel_impulse = np.array(pd.read_csv("channel.csv", header=None)[0])
-    # channel = Channel(artificial_channel_impulse)
-    # channel_input = np.load(f"full_pipeline_transmission_audio{reader_idx}.npy").reshape(-1)
-    # channel_output = channel.transmit(channel_input, noise = 0)
+    artificial_channel_impulse = np.array(pd.read_csv("channel.csv", header=None)[0])
+    channel = Channel(artificial_channel_impulse)
+    channel_input = np.load(f"full_pipeline_transmission_audio{reader_idx}.npy").reshape(-1)
+    channel_output = channel.transmit(channel_input, noise = 0)
 
     modu = Modulation("gray", N, L)
 

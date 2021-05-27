@@ -22,7 +22,6 @@ from scipy.interpolate import CubicSpline
 from sklearn.linear_model import LinearRegression
 import ldpc
 
-
 class Channel:
     def __init__(self, impulse_response: np.ndarray):
         self.impulse_response = impulse_response
@@ -267,7 +266,10 @@ class Demodulation:
 
     def OFDM2constellation(self, channel_output: np.ndarray, channel: Channel):
         num_frames = len(channel_output) / (self.N + self.L)
-        with_cyclic_frames = np.array_split(channel_output, num_frames)
+        try:
+            with_cyclic_frames = np.array_split(channel_output, num_frames)
+        except:
+            import pdb; pdb.set_trace()
         message_frames = [list(w[self.L :]) for w in with_cyclic_frames]
         fft_frames = [fft(m, self.N) for m in message_frames]
         channel_TF = channel.transfer_function(self.N)
@@ -551,6 +553,8 @@ class Receiver(Estimation):
             # Get output spectrum wihtout offset
             offset_slice = slice(ofdm_slice.start - total_offset, ofdm_slice.stop - total_offset)
             frame = channel_output[offset_slice]
+            if len(frame) < (self.N + self.L):
+                break
             deconvolved_frames = self.OFDM2constellation(frame, derived_channel)
             old_deconvolved_frames = deconvolved_frames.copy()
             
