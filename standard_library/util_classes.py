@@ -432,7 +432,6 @@ class Transmitter(Modulation):
         self.generate_estimation_random_bits(bits_filename, synchronisation)
 
     def generate_estimation_random_bits(self, bits_filename, synchronisation):
-        
         bits_per_chunk = self.get_bits_per_chunk(synchronisation)
         num_estimation_bits = self.num_estimation_symbols * bits_per_chunk
         random_bits = "{0:b}".format(random.getrandbits(num_estimation_bits))
@@ -442,7 +441,7 @@ class Transmitter(Modulation):
         print(f"random bits written to {bits_filename}")
 
     def full_pipeline(self, synchronisation, message_bits, OFDM_file_name):
-        
+        message_bits = "".join(str(mb) for mb in message_bits)
         total_bits = self.random_bits + message_bits
         OFDM_transmission, frames = self.data2OFDM(bitstring = total_bits, synchroniser=synchronisation, return_frames=True)
         print(f"{len(frames)} total OFDM symbols generated, of which {self.num_estimation_symbols} are used for estimation")
@@ -524,7 +523,7 @@ class Receiver(Estimation):
         return deconvolved_frame / np.exp(1j * lin_reg_slope * np.array(range(len(deconvolved_frame))).astype(complex))
 
     def full_pipeline(
-        self, channel_output, synchronisation, ground_truth_estimation_OFDM_frames, sample_shift, new_weight
+        self, channel_output, synchronisation, ground_truth_estimation_OFDM_frames, sample_shift, new_weight, decoder
     ):
         received_OFDM_slices = self.receive_channel_output(channel_output, synchronisation, sample_shift, return_as_slices=True)
         estimation_ofdm_slices = received_OFDM_slices[:self.num_estimation_symbols]
@@ -545,7 +544,7 @@ class Receiver(Estimation):
         np.save("impulse_response_pipline", impulse_response.real) 
         derived_channel = Channel(impulse_response.real)
 
-        bitstring = ""
+        received_constellations = []
 
         total_offset = 0
         for o_idx, ofdm_slice in enumerate(message_ofdm_slices):
@@ -580,12 +579,18 @@ class Receiver(Estimation):
 
                 deconvolved_frames[0][(synchronisation.pilot_idx+1).astype(int)] = None
                 derived_channel.update_channel_spectrum(full_pilot_spectrum, new_weight)
-                
+
             # Add to the bitstring as usual
             deconvolved_frames = [dcf[1 : int(self.N / 2)] for dcf in deconvolved_frames]
-            bitstring += self.constellation2bits_sequence(deconvolved_frames, synchronisation, old_deconvolved_frames)
+            received_constellations.extend(deconvolved_frames[0])
+        
+        # bitstring = "".join(self.constellation2bits_sequence(rec, synchronisation, old_deconvolved_frames) for rec in received_constellations)
+        
+        received_constellations = np.array(received_constellations).reshape(1, -1)
+        channel_spectrum = derived_channel.transfer_function(self.N)
+        decoded_bits = decoder.decode(received_constellations, channel_spectrum)
 
-        return bitstring, derived_channel
+        return decoded_bits, derived_channel
 
     
 class Encoding:
@@ -602,7 +607,7 @@ class Encoding:
 # This is a rate 1/2 convolutional code
 class ConvCoding(Encoding):
     def __init__(self, g_matrix = np.array([[0o5, 0o7]])):
-        super().__init__(self)
+        super().__init__()
         self.g_matrix = g_matrix
 
     def encode(self, inputs: np.ndarray, m: int = 2):
@@ -614,10 +619,10 @@ class ConvCoding(Encoding):
 
 class LDPCCoding(Encoding):
     def __init__(self, standard, rate, z, ptype):
-        super().__init__(self)
+        super().__init__()
         self.mycode = ldpc.code(standard, rate, z, ptype)
     
-    def encode(self, inputs:np.ndarray):
+    def __call__(self, inputs:np.ndarray):
         s = len(inputs)
         ceiling = np.ceil(s/ self.mycode.K)
         pad = np.random.randint(2, size = int(ceiling * self.mycode.K - s))
@@ -645,7 +650,7 @@ class Decoding:
 # This is for decoding a rate 1/2 convolutional code
 class ConvDecoding(Decoding):
     def __init__(self, g_matrix = np.array([[0o5, 0o7]])):
-        super().__init__(self)
+        super().__init__()
         self.g_matrix = g_matrix
 
     def decode(self, outputs: np.ndarray, m: int = 2):
@@ -657,10 +662,10 @@ class ConvDecoding(Decoding):
 
 class LDPCDecoding(Decoding):
     def __init__(self, standard, rate, z, ptype):
-        super().__init__(self)
+        super().__init__()
         self.mycode = ldpc.code(standard, rate, z, ptype)
     
-    def decode(self, outputs:np.ndarray, received_constellation, channel_estimation, s: int):
+    def decode(self, received_constellation, channel_estimation, s: int):
         ckarraylen = int(len(channel_estimation)/2 -1)
         ckarray = channel_estimation [1:1+ckarraylen]
         llr = []
