@@ -653,7 +653,7 @@ class LDPCDecoding(Decoding):
         super().__init__(self)
         self.mycode = ldpc.code(standard, rate, z, ptype)
     
-    def decode(self, outputs:np.ndarry, received_constellation, channel_estimation, s: int):
+    def decode(self, outputs:np.ndarray, received_constellation, channel_estimation, s: int):
         ckarraylen = int(len(channel_estimation)/2 -1)
         ckarray = channel_estimation [1:1+ckarraylen]
         llr = []
