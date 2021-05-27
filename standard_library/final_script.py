@@ -69,7 +69,7 @@ elif sys.argv[1] == 'receive':
     modu = Modulation("gray", N, L)
 
     ground_truth_estimation_OFDM_frames = get_OFDM_data_from_bits(modu, sync, source_bits = f"full_pipeline_random_bits{reader_idx}")
-    for nw in [0]:#, 0.1, 0.15, 0.2, 0.25]:
+    for nw in [0.0]:#, 0.1, 0.15, 0.2, 0.25]:
         received_bitstring, inferred_channel = receiver.full_pipeline(
             channel_output, sync, ground_truth_estimation_OFDM_frames, sample_shift = 0, new_weight = nw
         )

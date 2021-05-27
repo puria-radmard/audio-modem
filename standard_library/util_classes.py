@@ -549,7 +549,7 @@ class Receiver(Estimation):
         for o_idx, ofdm_slice in enumerate(message_ofdm_slices):
             
             # Get output spectrum wihtout offset
-            offset_slice = slice(ofdm_slice.start + total_offset, ofdm_slice.stop + total_offset)
+            offset_slice = slice(ofdm_slice.start - total_offset, ofdm_slice.stop - total_offset)
             frame = channel_output[offset_slice]
             deconvolved_frames = self.OFDM2constellation(frame, derived_channel)
             old_deconvolved_frames = deconvolved_frames.copy()
@@ -563,6 +563,9 @@ class Receiver(Estimation):
                 recovered_pilot_tones_left, recovered_pilot_tones_right = self.get_recovered_pilot_tones(deconvolved_frames, left_pilot_idx, right_pilot_idx)
                 phase_shifts = self.get_left_phase_shifts(synchronisation, recovered_pilot_tones_left)                
                 lin_reg_slope = self.linear_regression_offset(left_pilot_idx, phase_shifts)
+                current_delay = (self.N*lin_reg_slope)/(2*np.pi)
+                if current_delay > 0.9:
+                    total_offset += 0
                 deconvolved_frames = [self.fix_constellation_frame(d, lin_reg_slope, left_pilot_idx) for d in deconvolved_frames]
 
                 self.pilot_sync_figs.append((left_pilot_idx, recovered_pilot_tones_left, phase_shifts, self.N))        
@@ -610,7 +613,7 @@ class LDPCCoding(Encoding):
         super().__init__(self)
         self.mycode = ldpc.code(standard, rate, z, ptype)
     
-    def encode(self, inputs:np.ndarry):
+    def encode(self, inputs:np.ndarray):
         s = len(inputs)
         ceiling = np.ceil(s/ self.mycode.K)
         pad = np.random.randint(2, size = int(ceiling * self.mycode.K - s))
