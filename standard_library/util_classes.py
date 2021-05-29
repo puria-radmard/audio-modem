@@ -1,4 +1,3 @@
-import pdb
 import numpy as np
 from numpy.core.numeric import full
 import pandas as pd
@@ -266,10 +265,7 @@ class Demodulation:
 
     def OFDM2constellation(self, channel_output: np.ndarray, channel: Channel):
         num_frames = len(channel_output) / (self.N + self.L)
-        try:
-            with_cyclic_frames = np.array_split(channel_output, num_frames)
-        except:
-            import pdb; pdb.set_trace()
+        with_cyclic_frames = np.array_split(channel_output, num_frames)
         message_frames = [list(w[self.L :]) for w in with_cyclic_frames]
         fft_frames = [fft(m, self.N) for m in message_frames]
         channel_TF = channel.transfer_function(self.N)
@@ -284,18 +280,18 @@ class Demodulation:
         )
 
     def constellation2bits_sequence(
-        self, constellation_values: List[float], synchronisation, constellation_values_pre_rot, show=True
+        self, constellation_values: List[float], constellation_values_pre_rot, show=True
     ) -> str:
+
         symbol_bits_sequence = []
         const_hist = []
         const_hist_pre_rot = []
-        for i, c in enumerate(constellation_values):
-            for j, d in enumerate(c):
-                if np.isnan(d):
-                    continue
-                symbol_bits_sequence.extend(self.constellation2bits_single(d))
-                const_hist.extend([d])
-                const_hist_pre_rot.extend([constellation_values_pre_rot[i][j]])
+        for j, d in enumerate(constellation_values):
+            if np.isnan(d):
+                continue
+            symbol_bits_sequence.extend(self.constellation2bits_single(d))
+            const_hist.extend([d])
+            const_hist_pre_rot.extend([constellation_values_pre_rot[j]])
         output_bitstring = "".join([str(a) for a in symbol_bits_sequence])
 
         if show:
@@ -369,7 +365,7 @@ class Demodulation:
         for frame in OFDM_frames:
             deconvolved_frames = self.OFDM2constellation(frame, channel)
             deconvolved_frames = [dcf[1 : int(self.N / 2)] for dcf in deconvolved_frames]
-            bitstring += self.constellation2bits_sequence(deconvolved_frames, synchronisation)
+            bitstring += self.constellation2bits_sequence(deconvolved_frames)
 
         return bitstring
 
@@ -519,7 +515,6 @@ class Receiver(Estimation):
         axs[0].scatter(data0.real, data0.imag, c = range(len(data0)))
         axs[1].scatter(data1.real, data1.imag, c = range(len(data1)))
 
-        # import pdb; pdb.set_trace() # fig.savefig("rotation_test")
         return deconvolved_frame / np.exp(1j * lin_reg_slope * np.array(range(len(deconvolved_frame))).astype(complex))
 
     def full_pipeline(
@@ -545,6 +540,7 @@ class Receiver(Estimation):
         derived_channel = Channel(impulse_response.real)
 
         received_constellations = []
+        pre_rot_received_constellations = []
 
         total_offset = 0
         for o_idx, ofdm_slice in enumerate(message_ofdm_slices):
@@ -571,24 +567,34 @@ class Receiver(Estimation):
                     total_offset += 0
                 deconvolved_frames = [self.fix_constellation_frame(d, lin_reg_slope, left_pilot_idx) for d in deconvolved_frames]
 
-                self.pilot_sync_figs.append((left_pilot_idx, recovered_pilot_tones_left, phase_shifts, self.N))        
-                full_pilot_spectrum = self.interpolate_and_update_channel(
-                    left_pilot_idx, right_pilot_idx, recovered_pilot_tones_left, recovered_pilot_tones_right, 
-                    synchronisation, deconvolved_frames
-                )
+                self.pilot_sync_figs.append((left_pilot_idx, recovered_pilot_tones_left, phase_shifts, self.N))
+                if new_weight:        
+                    full_pilot_spectrum = self.interpolate_and_update_channel(
+                        left_pilot_idx, right_pilot_idx, recovered_pilot_tones_left, recovered_pilot_tones_right, 
+                        synchronisation, deconvolved_frames
+                    )
+                    derived_channel.update_channel_spectrum(full_pilot_spectrum, new_weight)
 
                 deconvolved_frames[0][(synchronisation.pilot_idx+1).astype(int)] = None
-                derived_channel.update_channel_spectrum(full_pilot_spectrum, new_weight)
+                old_deconvolved_frames[0][(synchronisation.pilot_idx+1).astype(int)] = None
 
-            # Add to the bitstring as usual
+            # Add to the histories
             deconvolved_frames = [dcf[1 : int(self.N / 2)] for dcf in deconvolved_frames]
-            received_constellations.extend(deconvolved_frames[0])
+            received_constellations.extend([d for d in deconvolved_frames[0] if ~np.isnan(d)])
+
+            old_deconvolved_frames = [dcf[1 : int(self.N / 2)] for dcf in old_deconvolved_frames]
+            pre_rot_received_constellations.extend([d for d in old_deconvolved_frames[0] if ~np.isnan(d)])
         
-        # bitstring = "".join(self.constellation2bits_sequence(rec, synchronisation, old_deconvolved_frames) for rec in received_constellations)
-        
+        # decoded_bits = self.constellation2bits_sequence(received_constellations, pre_rot_received_constellations)        
+
+        # modu = Modulation("gray", self.N, self.L)
+        # with open("encoded_bits", "r") as f:
+        #     original_encoded_bits = f.read()
+        # original_encoded_const = modu.sequence2constellation(original_encoded_bits)
+
         received_constellations = np.array(received_constellations).reshape(1, -1)
         channel_spectrum = derived_channel.transfer_function(self.N)
-        decoded_bits = decoder.decode(received_constellations, channel_spectrum)
+        decoded_bits = decoder.decode(received_constellations, channel_spectrum, 79800)
 
         return decoded_bits, derived_channel
 
@@ -666,11 +672,15 @@ class LDPCDecoding(Decoding):
         self.mycode = ldpc.code(standard, rate, z, ptype)
     
     def decode(self, received_constellation, channel_estimation, s: int):
+
         ckarraylen = int(len(channel_estimation)/2 -1)
         ckarray = channel_estimation [1:1+ckarraylen]
         llr = []
+        
         for i in range(len(received_constellation[0])):
         # take sigma squared to be 1 as they do not affect the results
+
+            # POSSIBLY ADD NEW CONSTELLATIONS
             yir = received_constellation[0][i].real
             yii = received_constellation[0][i].imag
             ckindex = i % ckarraylen
@@ -682,19 +692,24 @@ class LDPCDecoding(Decoding):
             # Gray coding
             llr.append(li1) 
             llr.append(li2)
+            if np.isnan(li1) or np.isnan(li2):
+                import pdb; pdb.set_trace()
 
         # each segmented component is of length mycode.N
-        ceiling = int(len(llr)/ self.mycode.N)
+        ceiling = int(len(llr) // self.mycode.N)    # pr450
+        ceiling = 247
+        llr = llr[:int(ceiling*self.mycode.N)] # pr450 
         llr_split = np.split(np.array(llr), ceiling)
 
         llr_ldpc_decoded = []
         for i in range(len(llr_split)):
             app, it = self.mycode.decode(llr_split[i])
+            import pdb; pdb.set_trace()
             app_half = app[:self.mycode.K]
             llr_ldpc_decoded.append(app_half)
 
         llr_ravel = np.ravel(llr_ldpc_decoded)
-
+        
         decoded_message = []
         for i in llr_ravel:
             if i > 0:
@@ -704,6 +719,7 @@ class LDPCDecoding(Decoding):
             decoded_message.append(decoded_bit)
 
         decoded_message_trimmed = decoded_message[:s]
+
         return decoded_message_trimmed
     
 
